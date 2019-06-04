@@ -15,9 +15,17 @@ import (
 
 // Envelope envelope
 type Envelope struct {
-	XMLName xml.Name `xml:"http://schemas.xmlsoap.org/soap/envelope/ Envelope"`
+	XMLName       xml.Name `xml:"soapenv:Envelope"`
+	Scope         string   `xml:"xmlns:soapenv,attr"`
+	ScopeBusiness string   `xml:"xmlns:business,attr"`
+	Header        *Header  `xml:",omitempty"`
+	Body          Body
+}
+
+type EnvelopeUnmarshal struct {
+	XMLName xml.Name `xml:"Envelope"`
 	Header  *Header  `xml:",omitempty"`
-	Body    Body
+	Body    BodyUnmarshal
 }
 
 // Header header
@@ -28,6 +36,12 @@ type Header struct {
 
 // Body body
 type Body struct {
+	XMLName xml.Name    `xml:"soapenv:Body"`
+	Fault   *Fault      `xml:",omitempty"`
+	Content interface{} `xml:",omitempty"`
+}
+
+type BodyUnmarshal struct {
 	XMLName xml.Name    `xml:"http://schemas.xmlsoap.org/soap/envelope/ Body"`
 	Fault   *Fault      `xml:",omitempty"`
 	Content interface{} `xml:",omitempty"`
@@ -139,6 +153,50 @@ Loop:
 	return nil
 }
 
+func (b *BodyUnmarshal) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	if b.Content == nil {
+		return xml.UnmarshalError("Content must be a pointer to a struct")
+	}
+	var (
+		token    xml.Token
+		err      error
+		consumed bool
+	)
+Loop:
+	for {
+		if token, err = d.Token(); err != nil {
+			return err
+		}
+		if token == nil {
+			break
+		}
+		envelopeNameSpace := "http://schemas.xmlsoap.org/soap/envelope/"
+		switch se := token.(type) {
+		case xml.StartElement:
+			if consumed {
+				return xml.UnmarshalError(
+					"Found multiple elements inside SOAP body; not wrapped-document/literal WS-I compliant")
+			} else if se.Name.Space == envelopeNameSpace && se.Name.Local == "Fault" {
+				b.Fault = &Fault{}
+				b.Content = nil
+				err = d.DecodeElement(b.Fault, &se)
+				if err != nil {
+					return err
+				}
+				consumed = true
+			} else {
+				if err = d.DecodeElement(b.Content, &se); err != nil {
+					return err
+				}
+				consumed = true
+			}
+		case xml.EndElement:
+			break Loop
+		}
+	}
+	return nil
+}
+
 // Call SOAP client API call
 func (s *Client) Call(soapAction string, request, response, header interface{}) error {
 	var envelope Envelope
@@ -153,6 +211,8 @@ func (s *Client) Call(soapAction string, request, response, header interface{}) 
 		}
 	} else {
 		envelope = Envelope{
+			Scope:         "http://schemas.xmlsoap.org/soap/envelope/",
+			ScopeBusiness: "http://cliente.bean.master.sigep.bsb.correios.com.br/",
 			Body: Body{
 				Content: request,
 			},
@@ -183,9 +243,12 @@ func (s *Client) Call(soapAction string, request, response, header interface{}) 
 		},
 		Dial: dialTimeout,
 	}
-
+	//spew.Dump(req)
 	client := &http.Client{Transport: tr}
 	res, err := client.Do(req)
+	//spew.Dump(res)
+	//spew.Dump(err)
+
 	if err != nil {
 		return errors.Wrap(err, "failed to send SOAP request")
 	}
@@ -200,14 +263,16 @@ func (s *Client) Call(soapAction string, request, response, header interface{}) 
 	}
 
 	rawbody, err := ioutil.ReadAll(res.Body)
+	//spew.Dump(rawbody)
 	if err != nil {
 		return errors.Wrap(err, "failed to read SOAP body")
 	}
 	if len(rawbody) == 0 {
 		return nil
 	}
-	respEnvelope := Envelope{}
-	respEnvelope.Body = Body{Content: response}
+
+	respEnvelope := EnvelopeUnmarshal{}
+	respEnvelope.Body = BodyUnmarshal{Content: response}
 	if header != nil {
 		respEnvelope.Header = &Header{Content: header}
 	}
@@ -215,5 +280,7 @@ func (s *Client) Call(soapAction string, request, response, header interface{}) 
 	if err = xml.Unmarshal(rawbody, &respEnvelope); err != nil {
 		return errors.Wrap(err, "failed to unmarshal response SOAP Envelope")
 	}
+	//spew.Dump(&respEnvelope)
+	//spew.Dump(err)
 	return nil
 }
